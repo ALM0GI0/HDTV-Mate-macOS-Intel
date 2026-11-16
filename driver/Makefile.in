@@ -1,0 +1,16 @@
+# Build on macOS (Homebrew libusb) or Linux.
+BREW   ?= $(shell brew --prefix 2>/dev/null || echo /usr/local)
+CC     ?= clang
+CFLAGS ?= -O2 -g
+override CFLAGS += -std=gnu11 -Ishim -Ivendor -I$(BREW)/include/libusb-1.0 -I$(BREW)/include \
+          -Wno-switch -Wno-incompatible-pointer-types-discards-qualifiers -Wno-unused-value \
+          -Wno-sometimes-uninitialized -Wno-parentheses -Wno-enum-compare -Wno-unknown-warning-option
+override LDLIBS += -L$(BREW)/lib -lusb-1.0 -lz -lpthread
+
+SRC = src/hdtvmate.c vendor/cxd2878.c vendor/alp_user.c
+
+hdtvmate: $(SRC) shim/kshim.h
+	$(CC) $(CFLAGS) $(SRC) -o $@ $(LDLIBS)
+
+clean:
+	rm -f hdtvmate
