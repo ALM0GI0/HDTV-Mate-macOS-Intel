@@ -1,0 +1,13 @@
+iMac20,1
+Intel(R) Core(TM) i5-7400 CPU @ 3.00GHz
+      Chipset Model: Radeon Pro 555
+          Resolution: 4096 x 2304 Retina
+PID    COMMAND          %CPU
+3795   biomesyncd       21.1
+63896  top              14.2
+0      kernel_task      12.5
+169    WindowServer     6.8 
+26355  Claude           4.4 
+241    airportd         4.1 
+26866  Terminal         2.6 
+26403  Claude Helper (R 2.0 

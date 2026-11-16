@@ -1,0 +1,15 @@
+== running:
+50429 /Users/almogio/hdtvmate/mac-app/dist/HDTV Mate.app/Contents/MacOS/HDTVMate
+== app.log:
+19:16:24.951 $ cd '/Users/almogio/hdtvmate/mac-app/dist/HDTV Mate.app/Contents/Resources/driver' && python3 tools/tvui.py --scan 14 36
+19:16:29.126 PROGRESS: RF 14 (473 MHz) trying ATSC 1.0...
+19:16:34.659 PROGRESS: RF 14 (473 MHz) trying ATSC 3.0...
+19:16:37.694 PROGRESS: RF 15 (479 MHz) trying ATSC 1.0...
+19:16:43.159 PROGRESS: RF 15 (479 MHz) trying ATSC 3.0...
+== homebrew links:
+== hdtvmate:
+hdtvmate - native macOS driver for the GTMEDIA/Zenview HDTV Mate
+
+Usage:
+  HDTV Mate.app/Contents/Resources/driver/hdtvmate info                         init bridge + detect demod, then exit
+  HDTV Mate.app/Contents/Resources/driver/hdtvmate scan [first] [last] [-1|-3]   scan US RF channels (default 2-36)

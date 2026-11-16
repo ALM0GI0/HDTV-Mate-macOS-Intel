@@ -1,0 +1,24 @@
+19:33:34.760 $ cd '/Users/almogio/hdtvmate/mac-app/dist/HDTV Mate.app/Contents/Resources/driver' && ./hdtvmate tune 36 -1 -o - | ffmpeg -nostdin -hide_banner -loglevel error -i - -map 0:p:1 -c copy -f mpegts -
+19:33:34.761 [app] streaming to mpv through pipe fd 6
+19:33:34.762 [mpv/lavf] EOF reached.
+19:33:34.762 [mpv] stream ended (reason 2, error: none)
+19:33:34.762 [mpv/cplayer] finished playback, success (reason 2)
+19:33:34.763 [mpv/vo/libmpv] mpv_render_context_render() not being called or stuck.
+19:33:34.882 [mpv/cplayer] Set property: deinterlace="yes" -> 1
+19:33:34.882 [mpv/cplayer] Set property: sub-visibility="yes" -> 1
+19:33:34.883 [mpv] opening stream
+19:33:34.883 [mpv/fd] Opening fdclose://6
+19:33:34.883 [mpv/fd] Cannot disable read ahead on file '6': Bad file descriptor
+19:33:34.883 [mpv/demux] Trying demuxers for level=normal.
+19:33:34.884 fd:: Protocol not found
+19:33:34.884 Did you mean file:fd:?
+19:33:34.884 [bridge] firmware already running: 1.12.0.0
+19:33:34.884 [bridge] initialization complete
+19:33:34.885 [demod] Detect CXD2878/CXD6801(SiP) chip.
+19:33:34.885 [demod] Detected the Tuner chip ASCOT3 ,ID 2878A
+19:33:34.992 [demod] CXD2878 initialized (chip id 0x396)
+19:33:34.992 Tuning 605.000 MHz, ATSC 1.0
+19:33:35.317 [ts] streaming started
+19:33:36.399 [   1s] SCVYL  RF -47.46 dBm  SNR  25.02 dB  TS 19.37 Mbps  pkts 12876  TEI 0  CC-err 0
+19:33:36.400 output closed, stopping
+19:33:36.516 USB errors: 0
