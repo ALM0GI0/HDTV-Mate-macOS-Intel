@@ -15,7 +15,7 @@ License: GPL-2.0-only (derived from cxd28xx).
 
 ```sh
 brew install libusb
-make
+make -f Makefile.in
 ```
 
 ## Firmware
