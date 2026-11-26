@@ -103,8 +103,13 @@ jobs:
 
           For ATSC 3.0 sound, open **Settings > ATSC 3.0 audio > Install AC-4 decoder** (needs Apple's command line tools). For slightly better ATSC 3.0 reception, import the stock firmware from the GTMEDIA Android app in Settings.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/*.zip \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "HDTV Mate ${GITHUB_REF_NAME#v}" \
-            --notes-file notes.md \
-            --generate-notes
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # re-run (e.g. after one Mac failed): add or replace the zips on the existing release
+            gh release upload "$GITHUB_REF_NAME" dist/*.zip --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "HDTV Mate ${GITHUB_REF_NAME#v}" \
+              --notes-file notes.md \
+              --generate-notes
+          fi

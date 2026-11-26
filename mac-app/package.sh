@@ -98,7 +98,7 @@ if [ ! -x "$FFB/ffmpeg" ]; then
         --enable-parser=mpegvideo,ac3,h264,hevc,aac \
         --enable-decoder=mpeg2video,ac3,eac3,h264,hevc,aac,pcm_s16le --enable-encoder=pcm_s16le,aac,h264_videotoolbox --enable-videotoolbox \
         --enable-filter=aresample,aformat,anull,bwdif,yadif,format,scale --enable-protocol=file,pipe,fd \
-        --enable-bsf=aac_adtstoasc,extract_extradata,h264_mp4toannexb,hevc_mp4toannexb "${EXTRA[@]}" >/dev/null \
+        --enable-bsf=aac_adtstoasc,extract_extradata,h264_mp4toannexb,hevc_mp4toannexb ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null \
       && make -j"$NCPU" ffmpeg >/dev/null 2>&1 ) || fail "ffmpeg build failed (see $FFB/ffbuild/config.log)"
 fi
 
