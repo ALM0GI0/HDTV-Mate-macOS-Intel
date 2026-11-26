@@ -455,7 +455,7 @@ static int bridge_init(const char *fwpath)
 /* ======================= output: pcap / LLS ======================= */
 
 static volatile sig_atomic_t g_stop;
-static FILE *g_ts_out, *g_pcap;
+static FILE *g_ts_out, *g_pcap, *g_guide_out;
 static struct alp_dev *g_alp;
 static struct dvb_frontend *g_fe;
 static u64 g_ts_bytes, g_ts_pkts, g_ts_sync_miss, g_usb_err, g_ts_tei, g_ts_cc_err;
@@ -607,7 +607,7 @@ struct ring {
 	pthread_t thr;
 	volatile int stop, dead;
 };
-static struct ring g_ts_ring, g_pcap_ring;
+static struct ring g_ts_ring, g_pcap_ring, g_guide_ring;
 static int g_atsc3;
 
 static void ring_put(struct ring *r, const u8 *d, size_t n)
@@ -700,6 +700,7 @@ static void LIBUSB_CALL ts_cb(struct libusb_transfer *t)
 			g_cc[pid] = 0x80 | cc;
 		}
 		if (g_ts_out) ring_put(&g_ts_ring, t->buffer, len);
+		if (g_guide_out) ring_put(&g_guide_ring, t->buffer, len);   /* drops, never blocks */
 		if (g_atsc3 && g_alp)
 			cxd2878_alp_feed_raw(g_fe->demodulator_priv, g_alp, t->buffer, len);
 		pthread_mutex_unlock(&out_lock);
@@ -847,6 +848,8 @@ static void usage(const char *p)
 		"  -p <plp>       ATSC 3.0 PLP id (default: all)\n"
 		"  -o <file|->    write raw TS (ATSC1: playable MPEG-TS; ATSC3: ALP-div-TS)\n"
 		"  -w <file|->    ATSC 3.0: write decapsulated IP packets as pcap (Wireshark, atsc3play.py)\n"
+		"  -g <file>      ATSC 1.0: also copy the TS here for a guide reader; data is dropped\n"
+		"                 (never blocking -o) if it falls behind, and streaming goes on if it closes\n"
 		"  -t <sec>       stop after N seconds (default: until Ctrl-C)\n"
 		"  -f <fw>        firmware file (default: ./dvb-usb-hdtvmate.fw)\n"
 		"  -v             verbose (I2C/driver debug)\n", p, p, p);
@@ -855,7 +858,7 @@ static void usage(const char *p)
 int main(int argc, char **argv)
 {
 	const char *fw = getenv("HDTVMATE_FW") ? getenv("HDTVMATE_FW") : "dvb-usb-hdtvmate.fw";
-	const char *tsout = NULL, *pcap = NULL;
+	const char *tsout = NULL, *pcap = NULL, *guide = NULL;
 	int atsc3 = 1, secs = 0, opt;
 	u32 plp = NO_STREAM_ID_FILTER;
 	int mode_scan = 0, scan_sys = 0;
@@ -866,9 +869,9 @@ int main(int argc, char **argv)
 	const char *pos[4];
 	int npos = 0;
 #ifdef __linux__
-	const char *optstr = "+13p:o:w:t:f:vh";
+	const char *optstr = "+13p:o:w:g:t:f:vh";
 #else
-	const char *optstr = "13p:o:w:t:f:vh";
+	const char *optstr = "13p:o:w:g:t:f:vh";
 #endif
 	optind = 2;
 	while (optind < argc) {
@@ -884,6 +887,7 @@ int main(int argc, char **argv)
 		case 'p': plp = strtoul(optarg, NULL, 0); break;
 		case 'o': tsout = optarg; break;
 		case 'w': pcap = optarg; break;
+		case 'g': guide = optarg; break;
 		case 't': secs = atoi(optarg); break;
 		case 'f': fw = optarg; break;
 		case 'v': kshim_verbose = 1; break;
@@ -970,6 +974,11 @@ int main(int argc, char **argv)
 		fflush(g_pcap);
 		ring_start(&g_pcap_ring, g_pcap);
 	}
+	if (guide && !atsc3) {
+		g_guide_out = fopen(guide, "wb");
+		if (g_guide_out) ring_start(&g_guide_ring, g_guide_out);
+		else perror(guide);                 /* the guide is optional: keep going */
+	}
 	if (atsc3) g_alp = alp_user_create(on_ip, NULL);
 
 	fprintf(stderr, "Tuning %.3f MHz, ATSC %s%s\n", hz / 1e6, atsc3 ? "3.0" : "1.0",
@@ -1006,6 +1015,8 @@ int main(int argc, char **argv)
 	streaming_stop();
 	ring_finish(&g_ts_ring, "TS");
 	ring_finish(&g_pcap_ring, "pcap");
+	if (g_guide_out) g_guide_ring.drop = 0;      /* a lagging guide reader isn't worth reporting */
+	ring_finish(&g_guide_ring, "guide");
 
 	if (atsc3 && g_nflows) {
 		fprintf(stderr, "\nIP multicast flows seen:\n");
@@ -1027,6 +1038,7 @@ done:
 	if (g_fe && g_fe->ops.sleep) g_fe->ops.sleep(g_fe);
 	if (g_ts_out && g_ts_out != stdout) fclose(g_ts_out);
 	if (g_pcap && g_pcap != stdout) fclose(g_pcap);
+	if (g_guide_out) fclose(g_guide_out);
 	libusb_release_interface(B.h, 0);
 	libusb_close(B.h);
 	libusb_exit(B.ctx);

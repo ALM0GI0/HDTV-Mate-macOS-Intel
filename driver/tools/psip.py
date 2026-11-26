@@ -148,7 +148,7 @@ def decode(ts):
                 gps_offset = s[13]
             elif tid == 0xCB:
                 eit_raw.append(s)
-        eit_pids = [p for t, p in mgt.items() if 0x0100 <= t <= 0x0103]
+        eit_pids = [p for t, p in mgt.items() if 0x0100 <= t <= 0x017F]   # EIT-0 .. EIT-127
         if not eit_pids or eit_raw:
             break
         secs = Sections(eit_pids)

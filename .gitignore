@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# build output (mac-app/package.sh, swift build)
+mac-app/.build/
+mac-app/dist/
+
+# Python
+__pycache__/
+*.pyc

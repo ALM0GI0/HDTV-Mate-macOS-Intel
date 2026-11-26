@@ -316,14 +316,31 @@ struct PlayerArea: View {
                             .foregroundStyle(.black)
                     }
                     Spacer()
+                    if tv.recordingStart == nil && tv.convertingCount > 0 {
+                        Label(tv.convertingCount > 1 ? "Saving \(tv.convertingCount) recordings…" : "Saving recording…", systemImage: "arrow.down.doc")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .foregroundStyle(.white)
+                    }
                     if let start = tv.recordingStart {
-                        TimelineView(.periodic(from: start, by: 1)) { ctx in
-                            Label("REC " + elapsed(from: start, to: ctx.date), systemImage: "record.circle.fill")
-                                .font(.caption.weight(.bold))
-                                .monospacedDigit()
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(.red, in: Capsule())
-                                .foregroundStyle(.white)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            TimelineView(.periodic(from: start, by: 1)) { ctx in
+                                Label("REC " + elapsed(from: start, to: ctx.date), systemImage: "record.circle.fill")
+                                    .font(.caption.weight(.bold))
+                                    .monospacedDigit()
+                                    .padding(.horizontal, 8).padding(.vertical, 4)
+                                    .background(.red, in: Capsule())
+                                    .foregroundStyle(.white)
+                            }
+                            if let space = tv.recordSpace {
+                                Text(space.text)
+                                    .font(.caption2.weight(.medium))
+                                    .monospacedDigit()
+                                    .padding(.horizontal, 7).padding(.vertical, 3)
+                                    .background(.black.opacity(0.55), in: Capsule())
+                                    .foregroundStyle(.white)
+                            }
                         }
                     }
                 }
@@ -353,6 +370,19 @@ struct ControlBar: View {
     }
 
     var body: some View {
+        VStack(spacing: 6) {
+            if let t = tv.timeshift, tv.canTimeshift, !t.atLive {
+                TimeshiftBar(t: t)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    .transition(.opacity)
+            }
+            controls
+        }
+        .animation(.easeInOut(duration: 0.2), value: tv.timeshift?.atLive)
+    }
+
+    private var controls: some View {
         HStack(spacing: 12) {
             Circle()
                 .fill(tv.playing == nil ? Color.secondary.opacity(0.5)
@@ -374,6 +404,11 @@ struct ControlBar: View {
                       fraction: tv.stats.snr.map { ($0 + 3) / 33 } ?? 0,
                       color: (tv.stats.snr ?? 99) < 8 ? Color.red : ((tv.stats.snr ?? 99) < 15 ? Color.orange : Color.green))
             }
+            if let other = tv.counterpart {
+                Button("Switch to \(other.std)") { tv.play(other) }
+                    .help("Watch \(other.label) \(other.name) on ATSC \(other.std) instead (RF \(other.rf), \(TVModel.mhz(other.rf)) MHz)")
+                    .disabled(tv.scanning)
+            }
             if tv.playing?.isATSC3 == true {
                 Picker("Audio", selection: $tv.audioLang) {
                     Text("Main audio").tag("")
@@ -384,6 +419,9 @@ struct ControlBar: View {
                 .labelsHidden()
                 .frame(width: 120)
                 .help("Audio language")
+            }
+            if tv.timeshiftMinutes > 0 {
+                TimeshiftButtons()
             }
             Button { tv.step(-1) } label: { Image(systemName: "chevron.up") }
                 .help("Previous channel (⌘↑)")
@@ -431,6 +469,77 @@ struct ControlBar: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+}
+
+/// Back 10 s, play/pause, forward 30 s and the LIVE indicator.
+struct TimeshiftButtons: View {
+    @EnvironmentObject var tv: TVModel
+
+    var body: some View {
+        let t = tv.timeshift
+        let on = tv.canTimeshift && t != nil
+        HStack(spacing: 6) {
+            Button { tv.skip(-10) } label: { Image(systemName: "gobackward.10") }
+                .help("Back 10 seconds (←)")
+                .disabled(!on)
+            Button { tv.togglePause() } label: {
+                Image(systemName: t?.paused == true ? "play.fill" : "pause.fill").frame(width: 14)
+            }
+            .help(t?.paused == true ? "Play (Space)" : "Pause live TV (Space)")
+            .disabled(!on)
+            Button { tv.skip(30) } label: { Image(systemName: "goforward.30") }
+                .help("Forward 30 seconds (→)")
+                .disabled(!on || (t?.behind ?? 0) < 2)
+            Button { tv.goLive() } label: {
+                HStack(spacing: 4) {
+                    Circle().fill(t?.atLive == true ? Color.red : Color.secondary).frame(width: 7, height: 7)
+                    Text(t.map { $0.atLive ? "LIVE" : "−" + TimeshiftBar.clock($0.behind) } ?? "LIVE")
+                        .font(.caption.weight(.bold)).monospacedDigit()
+                }
+                .frame(minWidth: 52)
+            }
+            .help(t?.atLive == true ? "You're watching live" : "Jump to live (⌘L)")
+            .disabled(!on || t?.atLive == true)
+        }
+    }
+}
+
+/// The buffered stretch of the channel, with the playhead; click or drag to move.
+struct TimeshiftBar: View {
+    @EnvironmentObject var tv: TVModel
+    let t: Timeshift
+
+    static func clock(_ s: Double) -> String {
+        let n = max(0, Int(s.rounded()))
+        return n >= 3600 ? String(format: "%d:%02d:%02d", n / 3600, n / 60 % 60, n % 60) : String(format: "%d:%02d", n / 60, n % 60)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("−" + TimeshiftBar.clock(t.length))
+                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                .help("How far back you can rewind on this channel")
+            GeometryReader { g in
+                let frac: Double = t.length > 0 ? (t.pos - t.start) / t.length : 1
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.25)).frame(height: 5)
+                    Capsule().fill(Color.accentColor).frame(width: max(5, g.size.width * frac), height: 5)
+                    Circle().fill(Color.white).shadow(radius: 1).frame(width: 12, height: 12)
+                        .offset(x: g.size.width * frac - 6)
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onEnded { v in
+                    let f = max(0, min(1, v.location.x / max(1, g.size.width)))
+                    tv.seek(to: t.start + f * t.length)
+                })
+            }
+            .frame(height: 14)
+            Text(t.paused ? "Paused · " + TimeshiftBar.clock(t.behind) + " behind" : TimeshiftBar.clock(t.behind) + " behind live")
+                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                .frame(minWidth: 110, alignment: .trailing)
+        }
     }
 }
 
@@ -483,6 +592,16 @@ struct SignalPanel: View {
                 row("Channel", tv.playing.map { "RF \($0.rf) · \(TVModel.mhz($0.rf)) MHz · ATSC \($0.std)" } ?? "–")
                 row("Tuned for", tv.playing == nil ? "–" : "\(tv.stats.t) s")
             }
+            Text("Video & audio").font(.title3.weight(.semibold)).padding(.top, 4)
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                row("Resolution", tv.video.resolution ?? "–")
+                row("Frame rate", tv.video.fps.map { "\($0) fps" } ?? "–")
+                row("Codec", tv.video.codec ?? "–")
+                row("Decoding", tv.video.decoding ?? "–")
+                row("Dynamic range", tv.video.dynamicRange ?? "–")
+                row("Dropped frames", tv.video.dropped ?? "–")
+                row("Audio", tv.video.audio ?? "–")
+            }
             chart("SNR (dB)", \.snr, .green)
             chart("RF level (dBm)", \.rf, .blue)
             chart("Bitrate (Mbps)", \.mbps, .orange)
@@ -526,8 +645,19 @@ struct GuideView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Program guide").font(.title2.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Program guide").font(.title2.weight(.semibold))
+                    HStack(spacing: 6) {
+                        if tv.guideRefreshing { ProgressView().controlSize(.mini) }
+                        Text(guideStatus).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
+                Button("Refresh now") { tv.refreshGuide() }
+                    .disabled(tv.guideRefreshing || tv.playing != nil || tv.scanning || !tv.tunerConnected)
+                    .help(tv.playing != nil
+                          ? "Stop playback to update every station. The channel you're watching updates on its own."
+                          : "Visit each ATSC 1.0 station for a few seconds to update its guide")
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
             .padding()
@@ -555,11 +685,25 @@ struct GuideView: View {
             .overlay {
                 if guideChannels.isEmpty {
                     EmptyState(title: "No guide data", systemImage: "calendar",
-                               message: "Guide data is read from ATSC 1.0 stations during a scan. Scan again to refresh it.") { EmptyView() }
+                               message: "Guide data comes from ATSC 1.0 stations. It updates while you watch and every couple of hours when the tuner is idle.") {
+                        Button("Refresh now") { tv.refreshGuide() }
+                            .disabled(tv.guideRefreshing || tv.playing != nil || !tv.tunerConnected)
+                    }
                 }
             }
         }
         .frame(minWidth: 600, minHeight: 520)
+    }
+
+    private var guideStatus: String {
+        if tv.guideRefreshing { return tv.guideMessage }
+        guard let last = tv.lastGuideRefresh else {
+            return "Updates while you watch, and every 2 hours when the tuner is idle"
+        }
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return "Last full update " + f.localizedString(for: last, relativeTo: Date())
+            + " · the channel you're watching updates live"
     }
 
     private func upcoming(_ ch: Channel) -> [EPGEvent] {
@@ -617,6 +761,79 @@ struct SettingsView: View {
                 Toggle("Resume the last channel when the app opens", isOn: $tv.resumeOnLaunch)
                 Toggle("Show DRM-protected channels in the list", isOn: $tv.showDRM)
             }
+            Section("Pause & rewind") {
+                Picker("Keep up to", selection: $tv.timeshiftMinutes) {
+                    Text("Off").tag(0)
+                    Text("30 minutes").tag(30)
+                    Text("1 hour").tag(60)
+                    Text("2 hours").tag(120)
+                }
+                Text(tv.timeshiftMinutes == 0
+                     ? "Live TV can't be paused."
+                     : "The channel you're watching is buffered on disk (up to about \(tv.timeshiftMinutes * 9 / 60 > 0 ? "\(tv.timeshiftMinutes * 9 / 60)" : "<1") GB, plus as much again while paused) so you can pause, rewind and catch up. It's cleared when you change channels. Space pauses, ← and → skip.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Recordings") {
+                Picker("Save recordings to", selection: $tv.recordPlace) {
+                    Text("Movies folder").tag(RecordPlace.movies)
+                    Text("SD card in the HDTV Mate").tag(RecordPlace.tunerCard)
+                    Text("Another folder").tag(RecordPlace.folder)
+                }
+                Picker("Format", selection: $tv.recordFormat) {
+                    Text("MP4 (opens in QuickTime, Photos, iPhone)").tag("mp4")
+                    Text("TS (the original broadcast stream)").tag("ts")
+                }
+                if tv.recordFormat == "mp4" {
+                    Toggle("Make MPEG-2 channels play in QuickTime", isOn: $tv.convertMPEG2)
+                }
+                Text(tv.recordFormat == "mp4"
+                     ? (tv.convertMPEG2
+                        ? "Recorded as a .ts and turned into an .mp4 when you stop. Most ATSC 1.0 stations send MPEG-2 video, which macOS can't play, so it's converted to H.264 with the Mac's hardware encoder (a few minutes per hour of TV). Everything else is copied as is."
+                        : "Recorded as a .ts and turned into an .mp4 when you stop, copied as is. MPEG-2 channels (most of ATSC 1.0) then play only in VLC or IINA; QuickTime gives sound only.")
+                     : "Saved exactly as broadcast. Plays in VLC or IINA; QuickTime doesn't open .ts files.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if tv.recordPlace == .folder {
+                    LabeledContent("Folder") {
+                        HStack {
+                            Text(tv.recordFolder.isEmpty ? "None chosen" : (tv.recordFolder as NSString).abbreviatingWithTildeInPath)
+                                .lineLimit(1).truncationMode(.middle)
+                                .foregroundStyle(tv.recordFolder.isEmpty ? Color.secondary : Color.primary)
+                            Button("Choose…") {
+                                let panel = NSOpenPanel()
+                                panel.canChooseDirectories = true
+                                panel.canChooseFiles = false
+                                panel.canCreateDirectories = true
+                                panel.message = "Choose where to save recordings"
+                                if panel.runModal() == .OK, let url = panel.url { tv.recordFolder = url.path }
+                            }
+                        }
+                    }
+                }
+                let (dir, fellBack) = tv.recordingFolder()
+                LabeledContent("Saving to") {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text((dir.path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
+                        if let free = TunerCard.freeBytes(at: dir.deletingLastPathComponent()) {
+                            Text(ByteCountFormatter.string(fromByteCount: free, countStyle: .file) + " free")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if fellBack {
+                    Text(tv.recordPlace == .tunerCard
+                         ? "No SD card found in the HDTV Mate, so recordings go to the Movies folder. Insert a card (exFAT is best: FAT32 cards can't hold files over 4 GB)."
+                         : "Choose a folder; until then recordings go to the Movies folder.")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if tv.recordPlace == .tunerCard {
+                    Text("If the card is removed or fills up during a recording, it continues in the Movies folder.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Show in Finder") {
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    NSWorkspace.shared.activateFileViewerSelecting([dir])
+                }
+            }
+            .onAppear { tv.refreshTunerCard() }
             Section("Tuner firmware") {
                 LabeledContent("In use") {
                     Text(tv.hasStockFirmware ? "Stock HDTV Mate firmware (imported)"

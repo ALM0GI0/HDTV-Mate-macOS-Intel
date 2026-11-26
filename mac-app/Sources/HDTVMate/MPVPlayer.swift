@@ -13,6 +13,27 @@ final class MPVPlayer {
     var onEndFile: (() -> Void)?
     var onLog: ((String) -> Void)?
 
+    /// Playback details shown in the side panel. mpv pushes changes on its event
+    /// thread; the UI reads a snapshot, so the main thread never waits on mpv.
+    static let infoProperties: [String] = [
+        "video-params/w", "video-params/h", "video-frame-info/interlaced", "video-params/gamma",
+        "estimated-vf-fps", "container-fps", "video-format", "hwdec-current",
+        "frame-drop-count", "decoder-frame-drop-count",
+        "audio-codec-name", "audio-params/channel-count", "audio-params/samplerate",
+        "time-pos", "pause",
+    ]
+    /// Observed as a node; its seekable range is stored as "buffer-start" / "buffer-end".
+    private static let cacheStateID: UInt64 = 1000
+    private let infoLock = NSLock()
+    private var infoValues: [String: String] = [:]
+
+    func infoSnapshot() -> [String: String] {
+        infoLock.lock()
+        let copy: [String: String] = infoValues
+        infoLock.unlock()
+        return copy
+    }
+
     init() {
         let h = mpv_create()!
         let options: [(String, String)] = [
@@ -48,6 +69,10 @@ final class MPVPlayer {
         }
         #endif
         mpv_initialize(h)
+        for (i, name) in MPVPlayer.infoProperties.enumerated() {
+            mpv_observe_property(h, UInt64(i + 1), name, MPV_FORMAT_STRING)
+        }
+        mpv_observe_property(h, MPVPlayer.cacheStateID, "demuxer-cache-state", MPV_FORMAT_NODE)
         mpv_request_log_messages(h, "v")
         mpv = h
         view = MPVGLView(mpv: h)
@@ -72,6 +97,27 @@ final class MPVPlayer {
                     if text.hasPrefix("Subtitle with unknown duration") { break }
                     emitLog("[mpv/\(prefix)] " + text.trimmingCharacters(in: .newlines))
                 }
+            case MPV_EVENT_PROPERTY_CHANGE:
+                if let raw = ev.pointee.data {
+                    let prop = raw.assumingMemoryBound(to: mpv_event_property.self).pointee
+                    let name: String = String(cString: prop.name)
+                    if ev.pointee.reply_userdata == MPVPlayer.cacheStateID {
+                        let range = prop.format == MPV_FORMAT_NODE ? MPVPlayer.seekableRange(prop.data) : nil
+                        infoLock.lock()
+                        infoValues["buffer-start"] = range.map { String($0.0) }
+                        infoValues["buffer-end"] = range.map { String($0.1) }
+                        infoLock.unlock()
+                        break
+                    }
+                    var value: String? = nil
+                    if prop.format == MPV_FORMAT_STRING, let d = prop.data,
+                       let cs = d.assumingMemoryBound(to: UnsafePointer<CChar>?.self).pointee {
+                        value = String(cString: cs)
+                    }
+                    infoLock.lock()
+                    infoValues[name] = value
+                    infoLock.unlock()
+                }
             case MPV_EVENT_START_FILE:
                 emitLog("[mpv] opening stream")
             case MPV_EVENT_FILE_LOADED:
@@ -89,6 +135,45 @@ final class MPVPlayer {
             default:
                 break
             }
+        }
+    }
+
+    /// The (start, end) of the last seekable range in a demuxer-cache-state node.
+    private static func seekableRange(_ data: UnsafeMutableRawPointer?) -> (Double, Double)? {
+        guard let node = data?.assumingMemoryBound(to: mpv_node.self).pointee,
+              node.format == MPV_FORMAT_NODE_MAP, let map = node.u.list?.pointee else { return nil }
+        for i in 0..<Int(map.num) {
+            guard let key = map.keys?[i], String(cString: key) == "seekable-ranges" else { continue }
+            let ranges = map.values[i]
+            guard ranges.format == MPV_FORMAT_NODE_ARRAY, let list = ranges.u.list?.pointee, list.num > 0 else { return nil }
+            let last = list.values[Int(list.num) - 1]
+            guard last.format == MPV_FORMAT_NODE_MAP, let r = last.u.list?.pointee else { return nil }
+            var start: Double?, end: Double?
+            for j in 0..<Int(r.num) {
+                guard let k = r.keys?[j], r.values[j].format == MPV_FORMAT_DOUBLE else { continue }
+                switch String(cString: k) {
+                case "start": start = r.values[j].u.double_
+                case "end": end = r.values[j].u.double_
+                default: break
+                }
+            }
+            if let s = start, let e = end { return (s, e) }
+        }
+        return nil
+    }
+
+    /// Pause & rewind: keep up to `minutes` of the stream in a disk cache so the player
+    /// keeps reading (the tuner never backs up) while paused. 0 turns it off. Takes
+    /// effect on the next channel load.
+    func configureTimeshift(minutes: Int, dir: String) {
+        guard minutes > 0 else { set("cache", "no"); return }
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let bytes: Int = minutes * 60 * 2_500_000       // ~20 Mbps, a full ATSC 1.0 channel at its busiest
+        for (k, v) in [("cache", "yes"), ("cache-on-disk", "yes"), ("demuxer-cache-dir", dir),
+                       ("demuxer-seekable-cache", "yes"), ("cache-pause", "no"),
+                       ("cache-secs", String(minutes * 60 + 60)),
+                       ("demuxer-max-back-bytes", String(bytes)), ("demuxer-max-bytes", String(bytes))] {
+            set(k, v)
         }
     }
 

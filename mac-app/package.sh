@@ -80,7 +80,7 @@ SWBIN="$(swift build "${SFLAGS[@]}" --show-bin-path)/HDTVMate"
 
 say "4/8 Building a small ffmpeg$([ "$PUBLIC" = 1 ] || echo " with the AC-4 decoder") (first time takes a few minutes)"
 FFSRC="$HERE/.build/src/ffmpeg-ac4"
-FFB="$BUILD/ffmpeg-min2-$PUBLIC"          # bump when the configure options change
+FFB="$BUILD/ffmpeg-min5-$PUBLIC"          # bump when the configure options change
 if [ ! -x "$FFB/ffmpeg" ]; then
     if [ ! -d "$FFSRC/.git" ]; then
         rm -rf "$FFSRC"; mkdir -p "$(dirname "$FFSRC")"
@@ -92,10 +92,11 @@ if [ ! -x "$FFB/ffmpeg" ]; then
     rm -rf "$FFB"; mkdir -p "$FFB"
     ( cd "$FFB" && "$FFSRC/configure" --cc=clang --disable-everything --disable-doc --disable-network \
         --disable-autodetect --disable-ffprobe --disable-ffplay \
-        --enable-demuxer=mpegts,mov,nut --enable-muxer=mpegts,nut,wav \
+        --enable-demuxer=mpegts,mov,nut --enable-muxer=mpegts,nut,wav,mp4,mov \
         --enable-parser=mpegvideo,ac3,h264,hevc,aac \
-        --enable-decoder=mpeg2video,ac3,eac3,h264,hevc,aac,pcm_s16le --enable-encoder=pcm_s16le \
-        --enable-filter=aresample,aformat,anull --enable-protocol=file,pipe,fd "${EXTRA[@]}" >/dev/null \
+        --enable-decoder=mpeg2video,ac3,eac3,h264,hevc,aac,pcm_s16le --enable-encoder=pcm_s16le,aac,h264_videotoolbox --enable-videotoolbox \
+        --enable-filter=aresample,aformat,anull,bwdif,yadif,format,scale --enable-protocol=file,pipe,fd \
+        --enable-bsf=aac_adtstoasc,extract_extradata,h264_mp4toannexb,hevc_mp4toannexb "${EXTRA[@]}" >/dev/null \
       && make -j"$NCPU" ffmpeg >/dev/null 2>&1 ) || fail "ffmpeg build failed (see $FFB/ffbuild/config.log)"
 fi
 
@@ -139,7 +140,7 @@ else
     cp "$DRIVER/dvb-usb-it9303-01.fw" "$R/driver/dvb-usb-hdtvmate.fw"
     FWNOTE="generic IT9303 firmware"
 fi
-cp "$DRIVER"/tools/{atsc3play,tvui,psip,extract_fw}.py "$DRIVER/tools/install_ac4.sh" "$R/driver/tools/"
+cp "$DRIVER"/tools/{atsc3play,tvui,psip,guide,extract_fw}.py "$DRIVER/tools/install_ac4.sh" "$R/driver/tools/"
 cp "$FFB/ffmpeg" "$R/bin/ffmpeg"
 [ "$PUBLIC" = 1 ] || cp "$FFB/ffmpeg" "$R/bin/ffmpeg-ac4"
 cp -R "$PY" "$R/python"
@@ -181,6 +182,10 @@ if [ "$PUBLIC" != 1 ]; then
     grep -q ac4 <<<"$DECS" || fail "AC-4 decoder missing from ffmpeg"
 fi
 "$R/python/bin/python3" -c "import zlib, json, http.server" || fail "bundled Python doesn't run"
+for t in atsc3play tvui psip guide; do      # every tool the app runs is present and parses
+    "$R/python/bin/python3" -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$R/driver/tools/$t.py" \
+        || fail "driver/tools/$t.py missing or broken in the bundle"
+done
 USAGE="$("$R/driver/hdtvmate" 2>&1 || true)"
 grep -q "Usage" <<<"$USAGE" || fail "bundled hdtvmate doesn't run"
 

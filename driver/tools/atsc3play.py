@@ -19,10 +19,34 @@ segments as fragmented MP4.
 
 Only clear (non-DRM) services can be played.
 """
-import argparse, gzip, os, queue, re, shutil, struct, subprocess, sys, tempfile, threading, time, zlib
+import argparse, gzip, json, os, queue, re, shutil, struct, subprocess, sys, tempfile, threading, time, zlib
 
 LLS_ADDR, LLS_PORT = "224.0.23.60", 4937
 INIT_TOI = 0xFFFFFFFF
+EARLY_KEEP = 3                 # media objects per track held while waiting for the SLS
+# The open-source AC-4 decoder sometimes rejects a frame (~33 ms of audio). Without
+# padding, the decoded audio comes up short each time, the player's small live
+# buffer drains and the sound drops out. async + min_hard_comp fills each missing
+# frame with silence so the audio timeline stays continuous.
+# aformat: the AC-4 decoder labels surround as "5.1(side)", which the AAC encoder writes
+# in a non-standard way that libmpv can't decode when it joins the live stream (every
+# frame fails with "channel element 0.1 is not allocated"). Relabelling it as plain 5.1
+# (same six speakers) gives standard AAC channel configuration 6.
+AUDIO_FILTER = "aresample=48000:async=1:min_hard_comp=0.01,aformat=channel_layouts=5.1|stereo|mono"
+
+
+def audio_codec_args():
+    """AAC for the stream handed to the player: recordings (which copy that stream)
+    stay small (~0.4 Mbps instead of ~4.6 Mbps of 5.1 PCM) and open in any player.
+    Falls back to PCM when this ffmpeg has no AAC encoder."""
+    try:
+        enc = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    except FileNotFoundError:
+        enc = ""
+    if re.search(r"^\s*A\S*\s+aac\s", enc, re.M):
+        return ["-c:a", "aac", "-b:a", "384k"]
+    log("ffmpeg has no AAC encoder -> PCM audio (large recordings)")
+    return ["-c:a", "pcm_s16le"]
 
 
 def log(*a):
@@ -243,6 +267,11 @@ class StartGate:
             if len(self.first) == len(self.tracks):
                 self.start = max(self.first.values())
                 log("starting all tracks at segment %d" % self.start)
+                # the other tracks already hold this segment: send it now rather
+                # than when their next segment arrives (~2 s later)
+                for t in self.tracks:
+                    if t is not track:
+                        t.drain()
         return self.start
 
 
@@ -263,39 +292,85 @@ class Track:
             if self.init is None:
                 self.init = data
             return
-        if self.init is None:
-            return
-        if self.gate is not None:
-            start = self.gate.seen(self, toi)
-            if start is None:
-                self.pending[toi] = data       # hold until every track has a segment
-                return
-            if not self.started:
-                for k in [k for k in self.pending if k < start]:
-                    del self.pending[k]
-                if toi < start:
-                    return
-                self.sink.put(self.init)
-                self.started = True
-                self.last = start - 1
-        if not self.started:
-            self.sink.put(self.init)
-            self.started = True
-            self.last = toi - 1
-        if toi <= self.last:
+        if self.init is None or toi <= self.last:
             return
         self.pending[toi] = data
+        if self.gate is not None and self.gate.seen(self, toi) is None:
+            return                              # hold until every track has a segment
+        self.drain()
+
+    def drain(self):
+        if not self.started:
+            if self.init is None or not self.pending:
+                return
+            if self.gate is not None:
+                start = self.gate.start
+                if start is None:
+                    return
+                for k in [k for k in self.pending if k < start]:
+                    del self.pending[k]
+                if not self.pending:
+                    return
+                self.last = start - 1
+            else:
+                self.last = min(self.pending) - 1
+            self.sink.put(self.init)
+            self.started = True
         # emit in order; tolerate a lost segment after it is 2 behind
         while self.pending:
             nxt = min(self.pending)
             if nxt == self.last + 1 or len(self.pending) > 2:
                 if nxt != self.last + 1:
                     log("track %s: segment(s) %d..%d lost" % (self.info.get("type"), self.last + 1, nxt - 1))
-                self.sink.put(self.pending.pop(nxt))
+                data = self.pending.pop(nxt)
+                self.sink.put(data)
                 self.last = nxt
                 self.segs += 1
+                if self.segs == 1:
+                    log("first %s segment delivered (%d bytes)" % (self.info.get("type"), len(data)))
             else:
                 break
+
+
+# ------------------------------------------------------------------ SLS address cache
+CACHE_FILE = os.path.join(os.environ.get("HDTVMATE_DATA") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "slt-cache.json")
+CACHE_FIELDS = ("chan", "name", "id", "ip", "port", "proto", "drm")
+
+
+def _read_cache():
+    try:
+        with open(CACHE_FILE) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def load_cached(key):
+    if not key:
+        return None
+    s = _read_cache().get(key)
+    if not isinstance(s, dict) or not all(k in s for k in CACHE_FIELDS):
+        return None
+    return s
+
+
+def save_cached(key, service):
+    if not key:
+        return
+    entry = {k: service[k] for k in CACHE_FIELDS}
+    d = _read_cache()
+    if d.get(key) == entry:
+        return
+    d[key] = entry
+    try:
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(d, f, indent=1)
+        os.replace(tmp, CACHE_FILE)
+    except OSError as e:
+        log("couldn't save the SLS cache: %s" % e)
 
 
 # ------------------------------------------------------------------ main
@@ -309,13 +384,22 @@ def main():
     ap.add_argument("--play", action="store_true", help="play with ffmpeg + ffplay")
     ap.add_argument("--no-audio", action="store_true", help="video only")
     ap.add_argument("--mux-out", help="with --play: write the muxed stream to this path (e.g. a FIFO) instead of ffplay")
+    ap.add_argument("--rf", type=int, help="RF channel being received; enables the SLS address cache")
     ap.add_argument("--ac4-ffmpeg", default=os.environ.get("HDTVMATE_AC4") or os.path.expanduser("~/hdtvmate/ffmpeg-ac4/ffmpeg"),
                     help="ffmpeg build with an AC-4 decoder (default: ~/hdtvmate/ffmpeg-ac4/ffmpeg)")
     args = ap.parse_args()
 
     src = sys.stdin.buffer if args.pcap == "-" else open(args.pcap, "rb")
     services, target, sls_seen, tracks = None, None, False, {}
+    # Start on the SLS address remembered from the last tune of this channel instead
+    # of waiting for the station's next service list; the SLT still checks it.
+    cache_key = "%s/%s" % (args.rf, args.service) if args.rf and args.service and not args.list else None
+    cached = load_cached(cache_key)
+    if cached and cached.get("proto") == "1" and not cached.get("drm"):
+        target = cached
+        log("using cached SLS address %s:%d for %s" % (target["ip"], target["port"], args.service))
     objs = Objects()
+    early = {}                              # tsi -> {toi: object} seen before the SLS
     sinks, ff = [], None
     t0 = time.time()
 
@@ -330,16 +414,27 @@ def main():
                     log("  %-6s %-10s id=%-6s %s%s" % (s["chan"], s["name"], s["id"],
                         {"1": "ROUTE", "2": "MMTP"}.get(s["proto"], "?"), "  [DRM]" if s["drm"] else ""))
                 if args.service:
+                    found = None
                     for s in services:
                         if args.service in (s["chan"], s["id"], s["name"]):
-                            target = s
-                    if not target:
+                            found = s
+                    if not found:
                         sys.exit("service %r not found" % args.service)
-                    if target["drm"]:
-                        sys.exit("%s is DRM-protected; pick a clear service" % target["name"])
-                    if target["proto"] != "1":
-                        sys.exit("%s uses MMTP (not supported yet)" % target["name"])
-                    log("selected %s %s, SLS at %s:%d" % (target["chan"], target["name"], target["ip"], target["port"]))
+                    if found["drm"]:
+                        sys.exit("%s is DRM-protected; pick a clear service" % found["name"])
+                    if found["proto"] != "1":
+                        sys.exit("%s uses MMTP (not supported yet)" % found["name"])
+                    moved = target is not None and (target["ip"], target["port"]) != (found["ip"], found["port"])
+                    if moved and sls_seen:
+                        save_cached(cache_key, found)
+                        sys.exit("%s moved to %s:%d since the last tune; pick the channel again"
+                                 % (found["name"], found["ip"], found["port"]))
+                    if target is None or moved:
+                        log("selected %s %s, SLS at %s:%d" % (found["chan"], found["name"], found["ip"], found["port"]))
+                    else:
+                        log("SLT confirms the cached SLS address")
+                    target = found
+                    save_cached(cache_key, found)
                 elif not args.list:
                     sys.exit("give --service (or --list)")
             continue
@@ -398,6 +493,10 @@ def main():
                 tmp = tempfile.mkdtemp(prefix="atsc3")
                 vpath, apath = os.path.join(tmp, "v.mp4"), os.path.join(tmp, "a.mp4")
                 os.mkfifo(vpath)
+                acodec = audio_codec_args()
+                # MPEG-TS when the audio is AAC: the app records the exact stream it plays, and
+                # TS can be joined mid-stream (NUT can't). PCM audio needs NUT.
+                mux_fmt = "nut" if "pcm_s16le" in acodec and audio is not None else "mpegts"
                 cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-copyts", "-i", vpath]
                 if audio is not None and ac4_dec and ac4_dec != "ffmpeg":
                     # AC-4 -> PCM (timestamps kept) in the side build, then muxed with the video
@@ -405,17 +504,17 @@ def main():
                     ppath = os.path.join(tmp, "pcm.nut")
                     os.mkfifo(ppath)
                     acmd = [ac4_dec, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-copyts", "-i", apath,
-                            "-vn", "-af", "aresample=48000", "-c:a", "pcm_s16le", "-f", "nut", ppath]
+                            "-vn", "-af", AUDIO_FILTER, "-c:a", "pcm_s16le", "-f", "nut", ppath]
                     subprocess.Popen(acmd, stdin=subprocess.DEVNULL)
-                    cmd += ["-i", ppath, "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "pcm_s16le"]
+                    cmd += ["-i", ppath, "-map", "0:v", "-map", "1:a", "-c:v", "copy"] + acodec
                 elif audio is not None:
                     os.mkfifo(apath)
                     cmd += ["-copyts", "-i", apath, "-map", "0:v", "-map", "1:a", "-c:v", "copy",
-                            "-af", "aresample=48000", "-c:a", "pcm_s16le"]
+                            "-af", AUDIO_FILTER] + acodec
                 else:
                     cmd += ["-c", "copy"]
                 if args.mux_out:
-                    cmd += ["-f", "nut", "-y", args.mux_out]
+                    cmd += ["-f", mux_fmt, "-y", args.mux_out]
                     log("starting muxer: " + " ".join(cmd))
                     ff = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
                 else:
@@ -437,18 +536,36 @@ def main():
             if audio is not None:
                 tracks[audio] = Track(audio, tr[audio], Sink(apath, "audio"), gate)
                 sinks.append(tracks[audio].sink)
+            for k, t in tracks.items():
+                held = early.get(k, {})
+                if INIT_TOI in held:
+                    t.on_object(INIT_TOI, held[INIT_TOI])
+                for toi_ in sorted(x for x in held if x != INIT_TOI):
+                    t.on_object(toi_, held[toi_])
+            if early:
+                log("replayed %d object(s) received before the track list"
+                    % sum(len(v) for k, v in early.items() if k in tracks))
+            early.clear()
             continue
 
         # 3) media
         t = tracks.get(tsi)
         if t is None:
+            if not sls_seen:
+                # The track list (SLS) can arrive a second or more after the media
+                # starts flowing: keep the newest complete objects so playback can
+                # start from them instead of waiting for the next segment.
+                obj = objs.feed((tsi, toi), length, start, data)
+                if obj is not None:
+                    keep = early.setdefault(tsi, {})
+                    keep[toi] = obj
+                    media = sorted(k for k in keep if k != INIT_TOI)
+                    for k in media[:-EARLY_KEEP]:
+                        del keep[k]
             continue
         obj = objs.feed((tsi, toi), length, start, data)
         if obj is not None:
-            before = t.segs
             t.on_object(toi, obj)
-            if before == 0 and t.segs == 1:
-                log("first %s segment delivered (%d bytes)" % (t.info.get("type"), len(obj)))
             if t.info.get("type") == "video" and t.segs and t.segs % 5 == 0 and t.segs != getattr(t, "_rep", 0):
                 t._rep = t.segs
                 log("%d video segments (%.0f s of video) after %.0f s" % (t.segs, t.segs * 2.002, time.time() - t0))
