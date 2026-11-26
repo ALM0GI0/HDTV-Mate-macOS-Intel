@@ -1,0 +1,110 @@
+# Builds the shareable HDTV Mate app (PUBLIC=1 bash mac-app/package.sh) for Intel and
+# Apple Silicon Macs.
+#
+#   Push a tag like v0.2      -> builds both and publishes a GitHub release with the two zips
+#   Actions tab > Run workflow -> builds both; the zips are attached to the run (no release)
+#
+# Shareable builds contain the generic IT9303 firmware and no AC-4 decoder: users import
+# the stock firmware and install the AC-4 decoder from the app's Settings.
+name: Build and release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # create the release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.kind }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            kind: Intel
+            arch: x86_64
+          - runner: macos-15
+            kind: Apple-Silicon
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.${GITHUB_RUN_NUMBER}-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # libusb, mpv libraries, ffmpeg and Python take ~10 minutes to fetch and build;
+      # reuse them until package.sh changes.
+      - name: Cache build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            mac-app/.build/pkg-${{ matrix.arch }}/deps
+            mac-app/.build/pkg-${{ matrix.arch }}/ffmpeg-min*-1
+            mac-app/.build/pkg-${{ matrix.arch }}/python
+            mac-app/.build/src
+          key: deps-${{ matrix.runner }}-${{ hashFiles('mac-app/package.sh') }}
+          restore-keys: deps-${{ matrix.runner }}-
+
+      - name: Build shareable app
+        env:
+          PUBLIC: "1"
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash mac-app/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HDTV-Mate-${{ matrix.kind }}
+          path: mac-app/dist/HDTV-Mate-${{ matrix.kind }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    # publish whatever built, even if one of the two Macs failed
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          cat > notes.md <<'EOF'
+          ## Download
+
+          - **HDTV-Mate-Intel.zip**: Intel Macs
+          - **HDTV-Mate-Apple-Silicon.zip**: Apple Silicon (M-series) Macs
+
+          Unzip, move **HDTV Mate.app** to Applications, plug in the GTMedia HDTV Mate and an antenna, and click Scan.
+
+          The app isn't notarized: the first time, right-click it and choose **Open** (or allow it in System Settings > Privacy & Security).
+
+          For ATSC 3.0 sound, open **Settings > ATSC 3.0 audio > Install AC-4 decoder** (needs Apple's command line tools). For slightly better ATSC 3.0 reception, import the stock firmware from the GTMEDIA Android app in Settings.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "HDTV Mate ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md \
+            --generate-notes

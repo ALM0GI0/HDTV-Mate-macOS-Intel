@@ -56,9 +56,9 @@ The repository is named `HDTV-Mate-macOS-Intel` because the currently distribute
 
 ## Install a prebuilt release
 
-Check the [GitHub Releases](https://github.com/ALM0GI0/HDTV-Mate-macOS-Intel/releases) page for a packaged download. On an Intel Mac, the package produced by the included build script is named `HDTV-Mate-Intel.zip`.
+Check the [GitHub Releases](https://github.com/ALM0GI0/HDTV-Mate-macOS-Intel/releases) page for a packaged download. Each release has `HDTV-Mate-Intel.zip` for Intel Macs and `HDTV-Mate-Apple-Silicon.zip` for M-series Macs.
 
-1. Download the Intel ZIP from the release.
+1. Download the ZIP for your Mac from the release.
 2. Double-click the ZIP to extract it.
 3. Move `HDTV Mate.app` into your Applications folder.
 4. Connect the GTMedia HDTV Mate and an antenna.
@@ -141,6 +141,17 @@ PUBLIC=1 bash package.sh
 `PUBLIC=1` tells the packaging script to use the generic IT9303 firmware rather than the stock HDTV Mate firmware, and not to bundle the AC-4-enabled FFmpeg binary. The app can offer the AC-4 setup separately.
 
 The default personal build may bundle `driver/dvb-usb-hdtvmate.fw` when that file is present, as well as an AC-4-enabled FFmpeg binary. Check that you have the right to redistribute any vendor firmware or other third-party materials before sharing a package built without `PUBLIC=1`.
+
+### Automatic release builds (GitHub Actions)
+
+`.github/workflows/release.yml` runs the shareable build (`PUBLIC=1`) on GitHub's Intel and Apple Silicon Mac runners. To publish a release, push a version tag:
+
+```bash
+git tag v0.2
+git push origin v0.2
+```
+
+Both builds run (about 15 minutes the first time, less once their dependencies are cached), and a release named after the tag appears on the Releases page with both ZIPs attached. To build without releasing, open the **Actions** tab, choose **Build and release**, and click **Run workflow**; the ZIPs are attached to that run.
 
 ### 5. Install the built app
 

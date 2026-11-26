@@ -9,6 +9,7 @@
 #   bash package.sh                     personal build: stock firmware + AC-4 decoder built in
 #   PUBLIC=1 bash package.sh            shareable build: generic firmware, AC-4 installed from Settings
 #   SIGN_ID="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=hdtvmate bash package.sh
+#   APP_VERSION=0.2 PUBLIC=1 bash package.sh   stamp a version number (the GitHub release workflow does this)
 #                                       signed + notarized (opens normally on any Mac)
 #
 # To get an Intel version, run this script on the Intel Mac (see make-kit.sh).
@@ -47,7 +48,8 @@ for h in client.h render.h render_gl.h; do
         || fail "couldn't download mpv header $h"
 done
 if ! ls "$DEPS"/mpvlibs/libmpv*.dylib >/dev/null 2>&1; then
-    DMGURL=$(curl -fsSL https://api.github.com/repos/iina/iina/releases/latest | grep -o 'https://[^"]*\.dmg' | head -1 || true)
+    AUTH=(); [ -n "${GITHUB_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")   # CI: avoid the API rate limit
+    DMGURL=$(curl -fsSL ${AUTH[@]+"${AUTH[@]}"} https://api.github.com/repos/iina/iina/releases/latest | grep -o 'https://[^"]*\.dmg' | head -1 || true)
     [ -n "$DMGURL" ] || fail "couldn't find IINA's download (it provides the mpv player libraries)"
     say "   downloading $(basename "$DMGURL")…"
     curl -fsSL "$DMGURL" -o "$BUILD/iina.dmg"
@@ -122,6 +124,10 @@ R="$APP/Contents/Resources"
 FW="$APP/Contents/Frameworks"
 cp "$SWBIN" "$APP/Contents/MacOS/HDTVMate"
 cp Info.plist "$APP/Contents/Info.plist"
+if [ -n "${APP_VERSION:-}" ]; then                    # e.g. APP_VERSION=0.2 (the release workflow sets it from the tag)
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER:-$APP_VERSION}" "$APP/Contents/Info.plist"
+fi
 if [ -f AppIcon.png ]; then
     ICONSET="$BUILD/AppIcon.iconset"; rm -rf "$ICONSET"; mkdir -p "$ICONSET"
     for sz in 16 32 128 256 512; do
