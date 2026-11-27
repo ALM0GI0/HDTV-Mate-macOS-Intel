@@ -1,11 +1,21 @@
-# Builds the shareable HDTV Mate app (PUBLIC=1 bash mac-app/package.sh) for Intel and
-# Apple Silicon Macs.
+
+# Builds the shareable HDTV Mate app for Intel and Apple Silicon Macs.
 #
-#   Push a tag like v0.2      -> builds both and publishes a GitHub release with the two zips
-#   Actions tab > Run workflow -> builds both; the zips are attached to the run (no release)
+#   Push a tag like v0.2 -> builds both and publishes a GitHub release.
+#   Actions > Run workflow -> builds both and attaches the downloads to the run.
 #
-# Shareable builds contain the generic IT9303 firmware and no AC-4 decoder: users import
-# the stock firmware and install the AC-4 decoder from the app's Settings.
+# Intel:
+#   HDTV-Mate-Intel.zip
+#
+# Apple Silicon:
+#   HDTV-Mate-Apple-Silicon.dmg
+#
+# Apple Silicon is packaged as an unsigned DMG, similar to Metrolist.
+# No paid Apple Developer account, Developer ID signing, or notarization required.
+#
+# Shareable builds contain generic IT9303 firmware and no AC-4 decoder.
+# Users import stock firmware and install the AC-4 decoder from Settings.
+
 name: Build and release
 
 on:
@@ -14,7 +24,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write          # create the release
+  contents: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,6 +33,7 @@ concurrency:
 jobs:
   build:
     name: Build (${{ matrix.kind }})
+
     strategy:
       fail-fast: false
       matrix:
@@ -30,16 +41,20 @@ jobs:
           - runner: macos-15-intel
             kind: Intel
             arch: x86_64
+
           - runner: macos-15
             kind: Apple-Silicon
             arch: arm64
+
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Version
         id: ver
+        shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
@@ -47,8 +62,7 @@ jobs:
             echo "version=0.0.${GITHUB_RUN_NUMBER}-dev" >> "$GITHUB_OUTPUT"
           fi
 
-      # libusb, mpv libraries, ffmpeg and Python take ~10 minutes to fetch and build;
-      # reuse them until package.sh changes.
+      # Cache build dependencies.
       - name: Cache build dependencies
         uses: actions/cache@v4
         with:
@@ -58,8 +72,10 @@ jobs:
             mac-app/.build/pkg-${{ matrix.arch }}/python
             mac-app/.build/src
           key: deps-${{ matrix.runner }}-${{ hashFiles('mac-app/package.sh') }}
-          restore-keys: deps-${{ matrix.runner }}-
+          restore-keys: |
+            deps-${{ matrix.runner }}-
 
+      # Build the actual application.
       - name: Build shareable app
         env:
           PUBLIC: "1"
@@ -68,18 +84,99 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash mac-app/package.sh
 
-      - uses: actions/upload-artifact@v4
+      # Apple Silicon only:
+      # Convert the existing app ZIP into an unsigned DMG.
+      - name: Package Apple Silicon DMG
+        if: matrix.kind == 'Apple-Silicon'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="mac-app/dist/HDTV-Mate-Apple-Silicon.zip"
+          DMG="mac-app/dist/HDTV-Mate-Apple-Silicon.dmg"
+
+          WORK="$RUNNER_TEMP/hdtv-mate-dmg"
+          UNPACKED="$WORK/unpacked"
+          STAGING="$WORK/staging"
+
+          # Start with a clean staging directory.
+          rm -rf "$WORK"
+
+          mkdir -p "$UNPACKED"
+          mkdir -p "$STAGING"
+          mkdir -p "mac-app/dist"
+
+          # Make sure the original package exists.
+          if [[ ! -f "$ZIP" ]]; then
+            echo "ERROR: Apple Silicon ZIP was not created."
+            exit 1
+          fi
+
+          # Extract the application.
+          ditto -x -k "$ZIP" "$UNPACKED"
+
+          # Locate HDTV Mate.app.
+          APP_SOURCE="$(find "$UNPACKED" \
+            -type d \
+            -name "HDTV Mate.app" \
+            -print -quit)"
+
+          if [[ -z "$APP_SOURCE" ]]; then
+            echo "ERROR: HDTV Mate.app was not found inside the ZIP."
+            find "$UNPACKED" -maxdepth 4 -print
+            exit 1
+          fi
+
+          echo "Found application: $APP_SOURCE"
+
+          # Copy the application into the DMG staging folder.
+          # ditto preserves macOS bundle metadata and resources.
+          ditto "$APP_SOURCE" "$STAGING/HDTV Mate.app"
+
+          # Create an Applications shortcut.
+          ln -s /Applications "$STAGING/Applications"
+
+          # Build a compressed, unsigned DMG.
+          hdiutil create \
+            -volname "HDTV Mate" \
+            -srcfolder "$STAGING" \
+            -ov \
+            -format UDZO \
+            "$DMG"
+
+          # Verify that the disk image is readable.
+          hdiutil verify "$DMG"
+
+          echo "Apple Silicon DMG created successfully:"
+          ls -lh "$DMG"
+
+      # Keep Intel distribution unchanged.
+      - name: Upload Intel ZIP
+        if: matrix.kind == 'Intel'
+        uses: actions/upload-artifact@v4
         with:
-          name: HDTV-Mate-${{ matrix.kind }}
-          path: mac-app/dist/HDTV-Mate-${{ matrix.kind }}.zip
+          name: HDTV-Mate-Intel
+          path: mac-app/dist/HDTV-Mate-Intel.zip
+          if-no-files-found: error
+
+      # Upload the new Apple Silicon DMG.
+      - name: Upload Apple Silicon DMG
+        if: matrix.kind == 'Apple-Silicon'
+        uses: actions/upload-artifact@v4
+        with:
+          name: HDTV-Mate-Apple-Silicon
+          path: mac-app/dist/HDTV-Mate-Apple-Silicon.dmg
           if-no-files-found: error
 
   release:
     name: Publish release
     needs: build
-    # publish whatever built, even if one of the two Macs failed
+
+    # Publish whichever architecture builds successfully.
     if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -89,27 +186,84 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          ls -la dist
+          set -euo pipefail
+
+          echo "Release assets:"
+          ls -lh dist
+
           cat > notes.md <<'EOF'
-          ## Download
+          ## Downloads
 
-          - **HDTV-Mate-Intel.zip**: Intel Macs
-          - **HDTV-Mate-Apple-Silicon.zip**: Apple Silicon (M-series) Macs
+          - **HDTV-Mate-Intel.zip** - Intel Macs
+          - **HDTV-Mate-Apple-Silicon.dmg** - Apple Silicon (M1, M2, M3, M4 and newer)
 
-          Unzip, move **HDTV Mate.app** to Applications, plug in the GTMedia HDTV Mate and an antenna, and click Scan.
+          ## Installation
 
-          The app isn't notarized: the first time, right-click it and choose **Open** (or allow it in System Settings > Privacy & Security).
+          ### Intel Macs
 
-          For ATSC 3.0 sound, open **Settings > ATSC 3.0 audio > Install AC-4 decoder** (needs Apple's command line tools). For slightly better ATSC 3.0 reception, import the stock firmware from the GTMEDIA Android app in Settings.
+          1. Download HDTV-Mate-Intel.zip.
+          2. Unzip the download.
+          3. Move HDTV Mate.app into Applications.
+
+          ### Apple Silicon Macs
+
+          1. Download HDTV-Mate-Apple-Silicon.dmg.
+          2. Double-click the DMG.
+          3. Drag HDTV Mate.app into Applications.
+          4. Eject the DMG.
+          5. Open HDTV Mate.
+
+          ## macOS security notice
+
+          HDTV Mate is not notarized by Apple and does not use a paid Developer ID certificate.
+
+          On the first launch, macOS may block the application.
+
+          To approve it:
+
+          1. Try opening HDTV Mate.
+          2. Open System Settings.
+          3. Select Privacy & Security.
+          4. Scroll down to Security.
+          5. Select Open Anyway next to the HDTV Mate security warning.
+          6. Confirm that you want to open the application.
+
+          The Open Anyway option is normally available for about one hour after the initial blocked launch.
+
+          ## ATSC 3.0 audio
+
+          Open Settings > ATSC 3.0 audio > Install AC-4 decoder.
+
+          Apple's command line tools are required.
+
+          ## Firmware
+
+          For slightly better ATSC 3.0 reception, import the stock firmware from the GTMedia Android app in Settings.
           EOF
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # re-run (e.g. after one Mac failed): add or replace the zips on the existing release
-            gh release upload "$GITHUB_REF_NAME" dist/*.zip --repo "$GITHUB_REPOSITORY" --clobber
+
+          if gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+
+            echo "Updating existing release..."
+
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.zip \
+
+            echo "Creating new release..."
+
+            gh release create "$GITHUB_REF_NAME" \
+              dist/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "HDTV Mate ${GITHUB_REF_NAME#v}" \
               --notes-file notes.md \
               --generate-notes
+
           fi
+
+          echo "Release published successfully."
